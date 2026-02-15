@@ -1,0 +1,156 @@
+name: Build UWUVCI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout UWUVCI-AIO
+        uses: actions/checkout@v4
+        with:
+          repository: ZestyTS/UWUVCI-AIO-WPF
+          ref: master
+          path: aio
+
+      # Having "ZestyTS' UWUVCI" everywhere is too much
+      - name: Patch application title
+        run: |
+          $file = "aio/UWUVCI AIO WPF/UI/Windows/MenuWindow.xaml.cs"
+          $content = Get-Content $file -Raw
+          $content = [regex]::Replace($content,'Title\s*=\s*\$".*?"', 'Title = $"UWUVCI v{version.Major}.{version.Minor}.{version.Build}  ({buildDate:MMM dd, yyyy})"')
+          $content = [regex]::Replace($content,'\s*ShowUnofficialBuildBanner\(\);\s*','')
+          Set-Content $file $content -Encoding UTF8
+
+      # Tag it as FOSS
+      - name: Patch a few attributes
+        run: |
+          $file = "aio/UWUVCI AIO WPF/Properties/AssemblyInfo.cs"
+          $content = Get-Content $file -Raw
+          $content = [regex]::Replace($content,'AssemblyTitle\(".*?"\)','AssemblyTitle("ZestyTS'' UWUVCI (FOSS)")')
+          $content = [regex]::Replace($content,'AssemblyProduct\(".*?"\)','AssemblyProduct("UWUVCI")')
+          $content = [regex]::Replace($content,'AssemblyCopyright\(".*?"\)','AssemblyCopyright("Copyright © 2026")')
+          Set-Content $file $content -Encoding UTF8
+
+      # Prevent fingerprinting, blacklisting, and update checks
+      - name: Patch a few functions
+        run: |
+          function CountChars($line, $char) {
+              return ($line -split ([regex]::Escape($char))).Count - 1
+          }
+
+          function Patch-Method {
+              param($file, $methodName, $replacement)
+              $lines = Get-Content $file
+              $inside = $false
+              $braceCount = 0
+              $newLines = @()
+
+              foreach ($line in $lines) {
+                  if ($inside) {
+                      $braceCount += CountChars $line '{'
+                      $braceCount -= CountChars $line '}'
+                      if ($braceCount -le 0) { $inside = $false }
+                      continue
+                  }
+                  if ($line -match "^\s*(public|private|internal|protected).*\b$methodName\s*\(") {
+                      $inside = $true
+                      $braceCount = CountChars $line '{' - CountChars $line '}'
+                      $newLines += $replacement
+                      continue
+                  }
+                  $newLines += $line
+              }
+
+              $newLines | Set-Content $file -Encoding UTF8
+          }
+
+          $svFile = "aio/UWUVCI AIO WPF/Services/ReleaseSignatureVerifier.cs"
+          Patch-Method $svFile "Verify" '        public static bool Verify(out string reason) { IsOfficialBuild = true; reason = "because-its-open-source"; return true; }'
+
+          $dfFile = "aio/UWUVCI AIO WPF/Services/DeviceFingerprint.cs"
+          Patch-Method $dfFile "GetPrimaryMacAddress" '        private static string GetPrimaryMacAddress() { var rng = new Random(); byte[] macBytes = new byte[6]; rng.NextBytes(macBytes); return string.Concat(macBytes.Select(b => b.ToString("x2"))); }'
+          Patch-Method $dfFile "IsDeviceBlacklistedAsync" '        public static async Task<bool> IsDeviceBlacklistedAsync(string blacklistUrl, int timeoutMs = 4000) { return false; }'
+
+          $mvFile = "aio/UWUVCI AIO WPF/Models/MainViewModel.cs"
+          Patch-Method $mvFile "Update" '        public void Update(bool userRequested) { return; }'
+
+      - name: Disable fingerprint logging
+        run: |
+          $file = "aio/UWUVCI AIO WPF/Helpers/Logger.cs"
+          $content = Get-Content $file -Raw
+          $content = [regex]::Replace($content,'(?s)^\s*try\s*\{\s*var fingerprint = DeviceFingerprint\.GetHashedFingerprint\(\);\s*if\s*\(!string\.IsNullOrWhiteSpace\(fingerprint\)\)\s*Log\(\$"Device fingerprint \(hashed\): \{fingerprint\}"\);\s*\}\s*catch\s*\{\s*\}','',[Text.RegularExpressions.RegexOptions]::Multiline)
+          Set-Content $file $content -Encoding UTF8
+
+      - name: Disable data collection
+        run: |
+          $file = "aio/UWUVCI AIO WPF/UI/Frames/SettingsFrame.xaml"
+
+          [xml]$xaml = Get-Content $file
+          $ns = New-Object System.Xml.XmlNamespaceManager($xaml.NameTable)
+          $ns.AddNamespace("x", $xaml.DocumentElement.NamespaceURI)
+
+          function Remove-ButtonByContent($content) {
+              $nodes = $xaml.SelectNodes("//x:Button[@Content='$content']", $ns)
+              foreach ($node in $nodes) {
+                  $null = $node.ParentNode.RemoveChild($node)
+              }
+          }
+
+          Remove-ButtonByContent "Check For Updates"
+          Remove-ButtonByContent "Show Tutorial Screens"
+          Remove-ButtonByContent "Submit Compatibility Entry"
+          Remove-ButtonByContent "Submit Feedback or Bug Report"
+          $xaml.Save($file)
+
+      - name: Disable community sharing
+        run: |
+          $file = "aio/UWUVCI AIO WPF/Classes/Injection.cs"
+          $content = Get-Content $file -Raw
+          $content = [regex]::Replace($content,'(?s)// --- Unified Community Contribution Prompt.*?Logger\.Log\(\$"Error while offering contribution: \{ex\.Message\}"\);\s*\}\s*','')
+          Set-Content $file $content -Encoding UTF8
+
+      - name: Disable tutorial and license check
+        run: |
+          $file = "aio/UWUVCI AIO WPF/App.xaml.cs"
+          $content = Get-Content $file -Raw
+          $content = $content.Replace("shouldShowTutorial = true;","shouldShowTutorial = false;")
+          $content = [regex]::Replace($content,'^\s*if\s*\(\s*!\s*LocalInstallGuard\.EnsureInstalled\s*\(\s*\)\s*\)\s*\{[\s\S]*?^\s*\}\s*','',[Text.RegularExpressions.RegexOptions]::Multiline)
+          Set-Content $file $content -Encoding UTF8
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v1
+
+      # CNUSPACKER from NuGet doesn't align with the source code
+      - name: Get packages
+        run: |
+          nuget restore "aio/UWUVCI AIO WPF/UWUVCI AIO WPF.csproj" -SolutionDirectory aio
+
+      - name: Build
+        run: |
+          msbuild "aio/UWUVCI AIO WPF/UWUVCI AIO WPF.csproj" /t:Build /p:Configuration=Release /p:Platform="Any CPU" /p:OutputPath="${{ github.workspace }}\output\UWUVCI" /p:GenerateManifests=false /p:GenerateClickOnceManifests=false /p:Install=false /p:SignManifests=false
+          Get-ChildItem -Path output\UWUVCI -Recurse | Where-Object { $_.Extension -ne ".exe" } | Remove-Item -Force -Recurse
+          Rename-Item -Path "output\UWUVCI\UWUVCI AIO WPF.exe" -NewName "UWUVCI AIO.exe"
+
+      # A library is missing to easily compile UWUVCI-VWII
+      - name: Get UWUVCI-VWII
+        run: |
+          Invoke-WebRequest "https://github.com/stuff-by-3-random-dudes/UWUVCI-AIO-WPF/releases/latest/download/UWUVCI_INSTALLER.exe" -OutFile "UWUVCI_INSTALLER.exe"
+          Invoke-WebRequest https://github.com/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip -OutFile innoextract.zip
+          Expand-Archive innoextract.zip -DestinationPath .
+          .\innoextract.exe -s -m -d extracted UWUVCI_INSTALLER.exe
+          Copy-Item -Path "extracted\app\UWUVCI VWII.exe" -Destination "output\UWUVCI\UWUVCI VWII.exe"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: UWUVCI
+          path: output
