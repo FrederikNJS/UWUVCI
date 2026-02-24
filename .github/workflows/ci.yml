@@ -26,8 +26,8 @@ jobs:
         run: |
           $file = "aio/UWUVCI AIO WPF/UI/Windows/MenuWindow.xaml.cs"
           $content = Get-Content $file -Raw
-          $content = [regex]::Replace($content,'Title\s*=\s*\$".*?"', 'Title = $"UWUVCI v{version.Major}.{version.Minor}.{version.Build}  ({buildDate:MMM dd, yyyy})"')
-          $content = [regex]::Replace($content,'\s*ShowUnofficialBuildBanner\(\);\s*','')
+          $content = [regex]::Replace($content,'Title\s*=\s*.*?;', 'Title = $"UWUVCI v{version.Major}.{version.Minor}.{version.Build}  ({buildDate:MMM dd, yyyy})";')
+          $content = [regex]::Replace($content,'\s*RefreshUnofficialBanner\(\);\s*','')
           Set-Content $file $content -Encoding UTF8
 
       # Tag it as FOSS
@@ -38,6 +38,11 @@ jobs:
           $content = [regex]::Replace($content,'AssemblyTitle\(".*?"\)','AssemblyTitle("ZestyTS'' UWUVCI (FOSS)")')
           $content = [regex]::Replace($content,'AssemblyProduct\(".*?"\)','AssemblyProduct("UWUVCI")')
           $content = [regex]::Replace($content,'AssemblyCopyright\(".*?"\)','AssemblyCopyright("Copyright © 2026")')
+          Set-Content $file $content -Encoding UTF8
+
+          $file = "aio/UWUVCI AIO WPF/UI/Frames/StartFrame.xaml"
+          $content = Get-Content $file -Raw
+          $content = [regex]::Replace($content,"Welcome to ZestyTS' UWUVCI Fork \(v([^)]+)\)",'Welcome to ZestyTS'' UWUVCI Fork (v$1 - FOSS)')
           Set-Content $file $content -Encoding UTF8
 
       # Prevent fingerprinting, blacklisting, and update checks
@@ -73,27 +78,30 @@ jobs:
               $newLines | Set-Content $file -Encoding UTF8
           }
 
-          $svFile = "aio/UWUVCI AIO WPF/Services/ReleaseSignatureVerifier.cs"
-          Patch-Method $svFile "Verify" '        public static bool Verify(out string reason) { IsOfficialBuild = true; reason = "because-its-open-source"; return true; }'
+          $file = "aio/UWUVCI AIO WPF/Services/ReleaseSignatureVerifier.cs"
+          Patch-Method $file "ValidateReleaseIntegrity" '        public static bool ValidateReleaseIntegrity(out string reason) { IsOfficialBuild = true; reason = "because-its-open-source"; return true; }'
 
-          $dfFile = "aio/UWUVCI AIO WPF/Services/DeviceFingerprint.cs"
-          Patch-Method $dfFile "GetPrimaryMacAddress" '        private static string GetPrimaryMacAddress() { var rng = new Random(); byte[] macBytes = new byte[6]; rng.NextBytes(macBytes); return string.Concat(macBytes.Select(b => b.ToString("x2"))); }'
-          Patch-Method $dfFile "IsDeviceBlacklistedAsync" '        public static async Task<bool> IsDeviceBlacklistedAsync(string blacklistUrl, int timeoutMs = 4000) { return false; }'
+          $file = "aio/UWUVCI AIO WPF/Services/DeviceFingerprint.cs"
+          Patch-Method $file "ResolveStableNetworkAddress" '        private static string ResolveStableNetworkAddress() { var rng = new Random(); byte[] macBytes = new byte[6]; rng.NextBytes(macBytes); return string.Concat(macBytes.Select(b => b.ToString("x2"))); }'
+          Patch-Method $file "CheckDeviceAccessAsync" '        public static async Task<bool> CheckDeviceAccessAsync(string blacklistUrl, int timeoutMs = 4000) { return false; }'
 
-          $mvFile = "aio/UWUVCI AIO WPF/Models/MainViewModel.cs"
-          Patch-Method $mvFile "Update" '        public void Update(bool userRequested) { return; }'
+          $file = "aio/UWUVCI AIO WPF/Models/MainViewModel.cs"
+          Patch-Method $file "CheckForAppUpdates" '        public void CheckForAppUpdates(bool userRequested) { return; }'
+
+          $file = "aio/UWUVCI AIO WPF/Services/StartupValidation.cs"
+          Patch-Method $file "CheckLocalInstall" '        internal static StartupCheckResult CheckLocalInstall() { return new StartupCheckResult(true, "ok"); }'
+          Patch-Method $file "CheckReleaseIntegrity" '        internal static StartupCheckResult CheckReleaseIntegrity() { return new StartupCheckResult(true, "because-its-open-source"); }'
 
       - name: Disable fingerprint logging
         run: |
           $file = "aio/UWUVCI AIO WPF/Helpers/Logger.cs"
           $content = Get-Content $file -Raw
-          $content = [regex]::Replace($content,'(?s)^\s*try\s*\{\s*var fingerprint = DeviceFingerprint\.GetHashedFingerprint\(\);\s*if\s*\(!string\.IsNullOrWhiteSpace\(fingerprint\)\)\s*Log\(\$"Device fingerprint \(hashed\): \{fingerprint\}"\);\s*\}\s*catch\s*\{\s*\}','',[Text.RegularExpressions.RegexOptions]::Multiline)
+          $content = $content.Replace("WriteStartupFingerprint();","")
           Set-Content $file $content -Encoding UTF8
 
       - name: Disable data collection
         run: |
           $file = "aio/UWUVCI AIO WPF/UI/Frames/SettingsFrame.xaml"
-
           [xml]$xaml = Get-Content $file
           $ns = New-Object System.Xml.XmlNamespaceManager($xaml.NameTable)
           $ns.AddNamespace("x", $xaml.DocumentElement.NamespaceURI)
@@ -105,25 +113,24 @@ jobs:
               }
           }
 
-          Remove-ButtonByContent "Check For Updates"
-          Remove-ButtonByContent "Show Tutorial Screens"
-          Remove-ButtonByContent "Submit Compatibility Entry"
-          Remove-ButtonByContent "Submit Feedback or Bug Report"
+          Remove-ButtonByContent "{StaticResource SettingsCheckUpdatesLabel}"
+          Remove-ButtonByContent "{StaticResource SettingsShowTutorialLabel}"
+          Remove-ButtonByContent "{StaticResource SettingsSubmitCompatLabel}"
+          Remove-ButtonByContent "{StaticResource SettingsSubmitFeedbackLabel}"
           $xaml.Save($file)
 
       - name: Disable community sharing
         run: |
           $file = "aio/UWUVCI AIO WPF/Classes/Injection.cs"
           $content = Get-Content $file -Raw
-          $content = [regex]::Replace($content,'(?s)// --- Unified Community Contribution Prompt.*?Logger\.Log\(\$"Error while offering contribution: \{ex\.Message\}"\);\s*\}\s*','')
+          $content = [regex]::Replace($content,'(?s)// --- Contribution prompt flow.*?Logger\.Log\(\$"Contribution prompt error: \{ex\.Message\}"\);\s*\}\s*','')
           Set-Content $file $content -Encoding UTF8
 
-      - name: Disable tutorial and license check
+      - name: Disable tutorial
         run: |
           $file = "aio/UWUVCI AIO WPF/App.xaml.cs"
           $content = Get-Content $file -Raw
-          $content = $content.Replace("shouldShowTutorial = true;","shouldShowTutorial = false;")
-          $content = [regex]::Replace($content,'^\s*if\s*\(\s*!\s*LocalInstallGuard\.EnsureInstalled\s*\(\s*\)\s*\)\s*\{[\s\S]*?^\s*\}\s*','',[Text.RegularExpressions.RegexOptions]::Multiline)
+          $content = $content.Replace("tutorialDefault = true;","tutorialDefault = false;")
           Set-Content $file $content -Encoding UTF8
 
       - name: Setup MSBuild
@@ -143,7 +150,7 @@ jobs:
       # A library is missing to easily compile UWUVCI-VWII
       - name: Get UWUVCI-VWII
         run: |
-          Invoke-WebRequest "https://github.com/stuff-by-3-random-dudes/UWUVCI-AIO-WPF/releases/latest/download/UWUVCI_INSTALLER.exe" -OutFile "UWUVCI_INSTALLER.exe"
+          Invoke-WebRequest https://github.com/stuff-by-3-random-dudes/UWUVCI-AIO-WPF/releases/latest/download/UWUVCI_INSTALLER.exe -OutFile UWUVCI_INSTALLER.exe
           Invoke-WebRequest https://github.com/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip -OutFile innoextract.zip
           Expand-Archive innoextract.zip -DestinationPath .
           .\innoextract.exe -s -m -d extracted UWUVCI_INSTALLER.exe
