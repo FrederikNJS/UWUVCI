@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ZestyTS/UWUVCI-AIO-WPF
-          ref: master
+          ref: V3.201.2
           path: aio
 
       # Having "ZestyTS' UWUVCI" everywhere is too much
